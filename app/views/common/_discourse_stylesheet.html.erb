@@ -1,12 +1,13 @@
-    <%- unless SiteCustomization.override_default_style(session[:preview_style]) %> 
-      <%=stylesheet_link_tag "application"%>
-    <%- end %>
+<%- if rtl? %>
+  <%= DiscourseStylesheets.stylesheet_link_tag(mobile_view? ? :mobile_rtl : :desktop_rtl) %>
+<%- else %>
+  <%= DiscourseStylesheets.stylesheet_link_tag(mobile_view? ? :mobile : :desktop) %>
+<%- end %>
 
-    <%- if mini_profiler_enabled? %>
-      <%- Rack::MiniProfiler.step "stylsheet" do%>
-        <%= stylesheet_link_tag "admin"%>     
-      <%-end%>
-    <%- elsif admin? %>
-      <%= stylesheet_link_tag "admin"%>
-    <%-end%>
-    <%=SiteCustomization.custom_stylesheet(session[:preview_style])%>
+<%- if staff? %>
+  <%= DiscourseStylesheets.stylesheet_link_tag(:admin) %>
+<%- end %>
+
+<%- unless customization_disabled? %>
+  <%= SiteCustomization.custom_stylesheet(session[:preview_style], mobile_view? ? :mobile : :desktop) %>
+<%- end %>

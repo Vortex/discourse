@@ -1,143 +1,158 @@
-require 'open-uri'
-
-require_dependency 'oneboxer/base'
-require_dependency 'oneboxer/whitelist'
-Dir["#{Rails.root}/lib/oneboxer/*_onebox.rb"].each {|f| 
-  require_dependency(f.split('/')[-2..-1].join('/')) 
-}
+require_dependency "#{Rails.root}/lib/onebox/discourse_onebox_sanitize_config"
+Dir["#{Rails.root}/lib/onebox/engine/*_onebox.rb"].sort.each { |f| require f }
 
 module Oneboxer
-  extend Oneboxer::Base
+  # keep reloaders happy
+  unless defined? Oneboxer::Result
+    Result = Struct.new(:doc, :changed) do
+      def to_html
+        doc.to_html
+      end
 
-  Dir["#{Rails.root}/lib/oneboxer/*_onebox.rb"].each do |f|
-    add_onebox "Oneboxer::#{Pathname.new(f).basename.to_s.gsub(/\.rb$/, '').classify}".constantize
-  end
-
-  def self.default_expiry
-    1.month
-  end
-
-  # Return a oneboxer for a given URL
-  def self.onebox_for_url(url)
-    matchers.each do |regexp, oneboxer|
-      regexp = regexp.call if regexp.class == Proc
-      return oneboxer.new(url) if url =~ regexp
-    end
-    nil
-  end
-
-  # Retrieve the onebox for a url without caching
-  def self.onebox_nocache(url)
-    oneboxer = onebox_for_url(url)
-    return oneboxer.onebox if oneboxer.present?
-
-    if Whitelist.allowed?(url)
-      page_html = open(url).read
-      if page_html.present?
-        doc = Nokogiri::HTML(page_html)
-
-        # See if if it has an oembed thing we can use
-        (doc/"link[@type='application/json+oembed']").each do |oembed|
-          return OembedOnebox.new(oembed[:href]).onebox
-        end
-        (doc/"link[@type='text/json+oembed']").each do |oembed|
-          return OembedOnebox.new(oembed[:href]).onebox   
-        end
-
-        # Check for opengraph
-        open_graph = Oneboxer.parse_open_graph(doc)
-        return OpenGraphOnebox.new(url, open_graph).onebox if open_graph.present?
+      def changed?
+        changed
       end
     end
+  end
 
-    nil
-  rescue OpenURI::HTTPError
-    nil
+  def self.preview(url, options=nil)
+    options ||= {}
+    invalidate(url) if options[:invalidate_oneboxes]
+    onebox_raw(url)[:preview]
+  end
+
+  def self.onebox(url, options=nil)
+    options ||= {}
+    invalidate(url) if options[:invalidate_oneboxes]
+    onebox_raw(url)[:onebox]
+  end
+
+  def self.cached_onebox(url)
+    if c = Rails.cache.read(onebox_cache_key(url))
+      c[:onebox]
+    end
+  rescue => e
+    invalidate(url)
+    Rails.logger.warn("invalid cached onebox for #{url} #{e}")
+    ""
+  end
+
+  def self.cached_preview(url)
+    if c = Rails.cache.read(onebox_cache_key(url))
+      c[:preview]
+    end
+  rescue => e
+    invalidate(url)
+    Rails.logger.warn("invalid cached preview for #{url} #{e}")
+    ""
+  end
+
+  def self.invalidate(url)
+    Rails.cache.delete(onebox_cache_key(url))
   end
 
   # Parse URLs out of HTML, returning the document when finished.
   def self.each_onebox_link(string_or_doc)
     doc = string_or_doc
-    doc = Nokogiri::HTML(doc) if doc.is_a?(String)
+    doc = Nokogiri::HTML::fragment(doc) if doc.is_a?(String)
 
     onebox_links = doc.search("a.onebox")
     if onebox_links.present?
       onebox_links.each do |link|
-        if link['href'].present?
-          yield link['href'], link
-        end
+        yield(link['href'], link) if link['href'].present?
       end
     end
 
     doc
   end
 
-  def self.create_post_reference(result, args={})
-    result.post_onebox_renders.create(post_id: args[:post_id]) if args[:post_id].present?
-  rescue ActiveRecord::RecordNotUnique    
-  end
-
-  def self.render_from_cache(url, args={})
-    result = OneboxRender.where(url: url).first
-
-    # Return the result but also create a reference to it
-    if result.present?
-      create_post_reference(result, args)
-      return result
+  def self.append_source_topic_id(url, topic_id)
+    # hack urls to create proper expansions
+    if url =~ Regexp.new("^#{Discourse.base_url.gsub(".","\\.")}.*$", true)
+      uri = URI.parse(url) rescue nil
+      if uri && uri.path
+        route = Rails.application.routes.recognize_path(uri.path) rescue nil
+        if route && route[:controller] == 'topics'
+          url += (url =~ /\?/ ? "&" : "?") + "source_topic_id=#{topic_id}"
+        end
+      end
     end
-    nil    
+    url
   end
 
-  # Cache results from a onebox call
-  def self.fetch_and_cache(url, args)
-    cooked, preview = onebox_nocache(url)
-    return nil if cooked.blank?
+  def self.apply(string_or_doc, args=nil)
+    doc = string_or_doc
+    doc = Nokogiri::HTML::fragment(doc) if doc.is_a?(String)
+    changed = false
 
-    # Store a cooked version in the database
-    OneboxRender.transaction do
-      begin
-        render = OneboxRender.create(url: url, preview: preview, cooked: cooked, expires_at: Oneboxer.default_expiry.from_now)
-        create_post_reference(render, args)
-      rescue ActiveRecord::RecordNotUnique
-      end      
-    end  
+    each_onebox_link(doc) do |url, element|
+      if args && args[:topic_id]
+        url = append_source_topic_id(url, args[:topic_id])
+      end
+      onebox, _preview = yield(url,element)
+      if onebox
+        parsed_onebox = Nokogiri::HTML::fragment(onebox)
+        next unless parsed_onebox.children.count > 0
 
-    [cooked, preview]  
-  end
-
-  # Retrieve a preview of a onebox, caching the result for performance 
-  def self.preview(url, args={})
-    cached = render_from_cache(url, args) unless args[:no_cache].present?
-
-    # If we have a preview stored, return that. Otherwise return cooked content.
-    if cached.present?
-      return cached.preview if cached.preview.present?
-      return cached.cooked
-    end
-    cooked, preview = fetch_and_cache(url, args)
-
-    return preview if preview.present?
-    cooked
-  end
-
-  def self.invalidate(url)
-    OneboxRender.destroy_all(url: url)
-  end
-
-  # Return the cooked content for a url, caching the result for performance
-  def self.onebox(url, args={})
-
-    if args[:invalidate_oneboxes].present?
-      # Remove the onebox from the cache
-      Oneboxer.invalidate(url)
-    else
-      cached = render_from_cache(url, args) unless args[:no_cache].present?
-      return cached.cooked if cached.present?
+        # special logic to strip empty p elements
+        if  element.parent &&
+            element.parent.node_name &&
+            element.parent.node_name.downcase == "p" &&
+            element.parent.children.count == 1
+          element = element.parent
+        end
+        changed = true
+        element.swap parsed_onebox.to_html
+      end
     end
 
-
-    cooked, preview = fetch_and_cache(url, args)
-    cooked
+    Result.new(doc, changed)
   end
+
+  def self.is_previewing?(user_id)
+    $redis.get(preview_key(user_id)) == "1"
+  end
+
+  def self.preview_onebox!(user_id)
+    $redis.setex(preview_key(user_id), 1.minute, "1")
+  end
+
+  def self.onebox_previewed!(user_id)
+    $redis.del(preview_key(user_id))
+  end
+
+  def self.engine(url)
+    Onebox::Matcher.new(url).oneboxed
+  end
+
+  private
+
+    def self.preview_key(user_id)
+      "onebox:preview:#{user_id}"
+    end
+
+    def self.blank_onebox
+      { preview: "", onebox: "" }
+    end
+
+    def self.onebox_cache_key(url)
+      "onebox__#{url}"
+    end
+
+    def self.onebox_raw(url)
+      Rails.cache.fetch(onebox_cache_key(url), expires_in: 1.day) do
+        uri = URI(url) rescue nil
+        return blank_onebox if uri.blank? || SiteSetting.onebox_domains_blacklist.include?(uri.hostname)
+        options = { cache: {}, max_width: 695, sanitize_config: Sanitize::Config::DISCOURSE_ONEBOX }
+        r = Onebox.preview(url, options)
+        { onebox: r.to_s, preview: r.try(:placeholder_html).to_s }
+      end
+    rescue => e
+      # no point warning here, just cause we have an issue oneboxing a url
+      # we can later hunt for failed oneboxes by searching logs if needed
+      Rails.logger.info("Failed to onebox #{url} #{e} #{e.backtrace}")
+      # return a blank hash, so rest of the code works
+      blank_onebox
+    end
 
 end

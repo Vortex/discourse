@@ -1,313 +1,379 @@
-require 'coffee_script'
-require 'v8'
+require 'mini_racer'
 require 'nokogiri'
+require 'erb'
+require_dependency 'url_helper'
+require_dependency 'excerpt_parser'
+require_dependency 'post'
+require_dependency 'discourse_tagging'
+require_dependency 'pretty_text/helpers'
 
 module PrettyText
-
-  def self.whitelist
-    {
-      :elements => %w[
-        a abbr aside b bdo blockquote br caption cite code col colgroup dd div del dfn dl
-        dt em hr figcaption figure h1 h2 h3 h4 h5 h6 hgroup i img ins kbd li mark
-        ol p pre q rp rt ruby s samp small span strike strong sub sup table tbody td
-        tfoot th thead time tr u ul var wbr
-      ],
-
-      :attributes => {
-        :all         => ['dir', 'lang', 'title', 'class'],
-        'aside'      => ['data-post', 'data-full', 'data-topic'],
-        'a'          => ['href'],
-        'blockquote' => ['cite'],
-        'col'        => ['span', 'width'],
-        'colgroup'   => ['span', 'width'],
-        'del'        => ['cite', 'datetime'],
-        'img'        => ['align', 'alt', 'height', 'src', 'width'],
-        'ins'        => ['cite', 'datetime'],
-        'ol'         => ['start', 'reversed', 'type'],
-        'q'          => ['cite'],
-        'span'       => ['style'],
-        'table'      => ['summary', 'width', 'style', 'cellpadding', 'cellspacing'],
-        'td'         => ['abbr', 'axis', 'colspan', 'rowspan', 'width', 'style'],
-        'th'         => ['abbr', 'axis', 'colspan', 'rowspan', 'scope', 'width', 'style'],
-        'time'       => ['datetime', 'pubdate'],
-        'ul'         => ['type']
-      },
-
-      :protocols => {
-        'a'          => {'href' => ['ftp', 'http', 'https', 'mailto', :relative]},
-        'blockquote' => {'cite' => ['http', 'https', :relative]},
-        'del'        => {'cite' => ['http', 'https', :relative]},
-        'img'        => {'src'  => ['http', 'https', :relative]},
-        'ins'        => {'cite' => ['http', 'https', :relative]},
-        'q'          => {'cite' => ['http', 'https', :relative]}
-      }
-    }     
-  end
-
-
-  class Helpers
-    # function here are available to v8 
-    def avatar_template(username)
-      return "" unless username
-
-      user = User.where(username_lower: username.downcase).first
-      if user
-        user.avatar_template
-      end
-    end
-
-    def is_username_valid(username)
-      return false unless username
-      username = username.downcase
-      return User.exec_sql('select 1 from users where username_lower = ?', username).values.length == 1
-    end
-  end
-
   @mutex = Mutex.new
-
-  def self.mention_matcher
-    /(\@[a-zA-Z0-9\-]+)/
-  end  
+  @ctx_init = Mutex.new
 
   def self.app_root
     Rails.root
   end
 
-  def self.v8
-    return @ctx unless @ctx.nil?
+  def self.find_file(root, filename)
+    return filename if File.file?("#{root}#{filename}")
 
-    @ctx = V8::Context.new
-    
-    @ctx["helpers"] = Helpers.new 
+    es6_name = "#{filename}.js.es6"
+    return es6_name if File.file?("#{root}#{es6_name}")
 
-    @ctx.load(app_root + "app/assets/javascripts/external/Markdown.Converter.js")
-    @ctx.load(app_root + "app/assets/javascripts/external/twitter-text-1.5.0.js")    
-    @ctx.load(app_root + "lib/headless-ember.js")
-    @ctx.load(app_root + "app/assets/javascripts/external/rsvp.js")    
-    @ctx.load(Rails.configuration.ember.handlebars_location)
-    #@ctx.load(Rails.configuration.ember.ember_location)
+    js_name = "#{filename}.js"
+    return js_name if File.file?("#{root}#{js_name}")
 
-    @ctx.load(app_root + "app/assets/javascripts/external/sugar-1.3.5.js")
-    @ctx.eval("var Discourse = {}; Discourse.SiteSettings = #{SiteSetting.client_settings_json};")
-    @ctx.eval("var window = {}; window.devicePixelRatio = 2;") # hack to make code think stuff is retina
+    erb_name = "#{filename}.js.es6.erb"
+    return erb_name if File.file?("#{root}#{erb_name}")
+  end
 
-    @ctx.eval(CoffeeScript.compile(File.read(app_root + "app/assets/javascripts/discourse/components/bbcode.js.coffee")))
-    @ctx.eval(CoffeeScript.compile(File.read(app_root + "app/assets/javascripts/discourse/components/utilities.coffee")))
+  def self.apply_es6_file(ctx, root_path, part_name)
+    filename = find_file(root_path, part_name)
+    if filename
+      source = File.read("#{root_path}#{filename}")
 
-    # Load server side javascripts
-    if DiscoursePluginRegistry.server_side_javascripts.present?
-      DiscoursePluginRegistry.server_side_javascripts.each do |ssjs|
-        @ctx.load(ssjs)
+      if filename =~ /\.erb$/
+        source = ERB.new(source).result(binding)
+      end
+
+      template = Tilt::ES6ModuleTranspilerTemplate.new {}
+      transpiled = template.module_transpile(source, "#{Rails.root}/app/assets/javascripts/", part_name)
+      ctx.eval(transpiled)
+    else
+      # Look for vendored stuff
+      vendor_root = "#{Rails.root}/vendor/assets/javascripts/"
+      filename = find_file(vendor_root, part_name)
+      if filename
+        ctx.eval(File.read("#{vendor_root}#{filename}"))
+      end
+    end
+  end
+
+  def self.create_es6_context
+    ctx = MiniRacer::Context.new(timeout: 15000)
+
+    ctx.eval("window = {}; window.devicePixelRatio = 2;") # hack to make code think stuff is retina
+
+    if Rails.env.development? || Rails.env.test?
+      ctx.attach("console.log", proc { |l| p l })
+    end
+
+    ctx_load(ctx, "#{Rails.root}/app/assets/javascripts/discourse-loader.js")
+    ctx_load(ctx, "vendor/assets/javascripts/lodash.js")
+    manifest = File.read("#{Rails.root}/app/assets/javascripts/pretty-text-bundle.js")
+    root_path = "#{Rails.root}/app/assets/javascripts/"
+    manifest.each_line do |l|
+      l = l.chomp
+      if l =~ /\/\/= require (\.\/)?(.*)$/
+        apply_es6_file(ctx, root_path, Regexp.last_match[2])
+      elsif l =~ /\/\/= require_tree (\.\/)?(.*)$/
+        path = Regexp.last_match[2]
+        Dir["#{root_path}/#{path}/**"].sort.each do |f|
+          apply_es6_file(ctx, root_path, f.sub(root_path, '')[1..-1].sub(/\.js.es6$/, ''))
+        end
       end
     end
 
-    @ctx['quoteTemplate'] = File.open(app_root + 'app/assets/javascripts/discourse/templates/quote.js.shbrs') {|f| f.read}
-    @ctx['quoteEmailTemplate'] = File.open(app_root + 'lib/assets/quote_email.js.shbrs') {|f| f.read}
-    @ctx.eval("HANDLEBARS_TEMPLATES = { 
-      'quote': Handlebars.compile(quoteTemplate),
-      'quote_email': Handlebars.compile(quoteEmailTemplate),
-     };")
+    apply_es6_file(ctx, root_path, "discourse/lib/utilities")
+
+    PrettyText::Helpers.instance_methods.each do |method|
+      ctx.attach("__helpers.#{method}", PrettyText::Helpers.method(method))
+    end
+    ctx.load("#{Rails.root}/lib/pretty_text/shims.js")
+    ctx.eval("__setUnicode(#{Emoji.unicode_replacements_json})")
+
+    to_load = []
+    DiscoursePluginRegistry.each_globbed_asset do |a|
+      to_load << a if File.file?(a) && a =~ /discourse-markdown/
+    end
+    to_load.uniq.each do |f|
+      if f =~ /^.+assets\/javascripts\//
+        root = Regexp.last_match[0]
+        apply_es6_file(ctx, root, f.sub(root, '').sub(/\.js\.es6$/, ''))
+      end
+    end
+
+    ctx
+  end
+
+  def self.v8
+    return @ctx if @ctx
+
+    # ensure we only init one of these
+    @ctx_init.synchronize do
+      return @ctx if @ctx
+      @ctx = create_es6_context
+    end
+
     @ctx
   end
 
-  def self.markdown(text, opts=nil)
-    # we use the exact same markdown converter as the client
-    # TODO: use the same extensions on both client and server (in particular the template for mentions) 
-    
-    baked = nil
+  def self.reset_context
+    @ctx_init.synchronize do
+      @ctx = nil
+    end
+  end
 
-    @mutex.synchronize do        
-      # we need to do this to work in a multi site environment, many sites, many settings
-      v8.eval("Discourse.SiteSettings = #{SiteSetting.client_settings_json};")
-      v8.eval("Discourse.BaseUrl = 'http://#{RailsMultisite::ConnectionManagement.current_hostname}';")
-      v8['opts'] = opts || {}
-      v8['raw'] = text
-      v8.eval('opts["mentionLookup"] = function(u){return helpers.is_username_valid(u);}')
-      v8.eval('opts["lookupAvatar"] = function(p){return Discourse.Utilities.avatarImg({username: p, size: "tiny", avatarTemplate: helpers.avatar_template(p)});}')
-      baked = v8.eval('Discourse.Utilities.markdownConverter(opts).makeHtml(raw)') 
+  def self.markdown(text, opts={})
+    # we use the exact same markdown converter as the client
+    # TODO: use the same extensions on both client and server (in particular the template for mentions)
+    baked = nil
+    text = text || ""
+
+    protect do
+      context = v8
+
+      paths = {
+        baseUri: Discourse::base_uri,
+        CDN: Rails.configuration.action_controller.asset_host,
+      }
+
+      if SiteSetting.enable_s3_uploads?
+        if SiteSetting.s3_cdn_url.present?
+          paths[:S3CDN] = SiteSetting.s3_cdn_url
+        end
+        paths[:S3BaseUrl] = Discourse.store.absolute_base_url
+      end
+
+      context.eval("__optInput = {};")
+      context.eval("__optInput.siteSettings = #{SiteSetting.client_settings_json};")
+      context.eval("__paths = #{paths.to_json};")
+
+      if opts[:topicId]
+        context.eval("__optInput.topicId = #{opts[:topicId].to_i};")
+      end
+
+      context.eval("__optInput.userId = #{opts[:user_id].to_i};") if opts[:user_id]
+
+      context.eval("__optInput.getURL = __getURL;")
+      context.eval("__optInput.getCurrentUser = __getCurrentUser;")
+      context.eval("__optInput.lookupAvatar = __lookupAvatar;")
+      context.eval("__optInput.getTopicInfo = __getTopicInfo;")
+      context.eval("__optInput.categoryHashtagLookup = __categoryLookup;")
+      context.eval("__optInput.mentionLookup = __mentionLookup;")
+
+      custom_emoji = {}
+      Emoji.custom.map { |e| custom_emoji[e.name] = e.url }
+      context.eval("__optInput.customEmoji = #{custom_emoji.to_json};")
+
+      context.eval('__textOptions = __buildOptions(__optInput);')
+
+      # Be careful disabling sanitization. We allow for custom emails
+      if opts[:sanitize] == false
+        context.eval('__textOptions.sanitize = false;')
+      end
+
+      opts = context.eval("__pt = new __PrettyText(__textOptions);")
+
+      DiscourseEvent.trigger(:markdown_context, context)
+      baked = context.eval("__pt.cook(#{text.inspect})")
     end
 
-    # we need some minimal server side stuff, apply CDN and TODO filter disallowed markup
-    baked = apply_cdn(baked, Rails.configuration.action_controller.asset_host)  
+    if baked.blank? && !(opts || {})[:skip_blank_test]
+      # we may have a js engine issue
+      test = markdown("a", skip_blank_test: true)
+      if test.blank?
+        Rails.logger.warn("Markdown engine appears to have crashed, resetting context")
+        reset_context
+        opts ||= {}
+        opts = opts.dup
+        opts[:skip_blank_test] = true
+        baked = markdown(text, opts)
+      end
+    end
+
     baked
   end
 
   # leaving this here, cause it invokes v8, don't want to implement twice
-  def self.avatar_img(username, size)
-    r = nil
-    @mutex.synchronize do        
-      v8['username'] = username
-      v8['size'] = size
-      v8.eval("Discourse.SiteSettings = #{SiteSetting.client_settings_json};")
-      v8.eval("Discourse.CDN = '#{Rails.configuration.action_controller.asset_host}';")
-      v8.eval("Discourse.BaseUrl = '#{RailsMultisite::ConnectionManagement.current_hostname}';")
-      r = v8.eval("Discourse.Utilities.avatarImg({ username: username, size: size });") 
+  def self.avatar_img(avatar_template, size)
+    protect do
+      v8.eval("__utils.avatarImg({size: #{size.inspect}, avatarTemplate: #{avatar_template.inspect}}, __getURL);")
     end
-    r
   end
 
-  def self.apply_cdn(html, url)
-    return html unless url
+  def self.unescape_emoji(title)
+    return title unless SiteSetting.enable_emoji?
 
-    image = /\.(jpg|jpeg|gif|png|tiff|tif)$/
-
-    doc = Nokogiri::HTML.fragment(html)
-    doc.css("a").each do |l|
-      href = l.attributes["href"].to_s
-      if href[0] == '/' && href =~ image
-        l["href"] = url + href
-      end
+    set = SiteSetting.emoji_set.inspect
+    protect do
+      v8.eval("__performEmojiUnescape(#{title.inspect}, { getURL: __getURL, emojiSet: #{set} })")
     end
-    doc.css("img").each do |l|
-      src = l.attributes["src"].to_s
-      if src[0] == '/' 
-        l["src"] = url + src
-      end
-    end
-
-    doc.to_s
   end
 
   def self.cook(text, opts={})
-    cloned = opts.dup
+    options = opts.dup
+
     # we have a minor inconsistency
-    cloned[:topicId] = opts[:topic_id]
-    sanitized = Sanitize.clean(markdown(text.dup, cloned), PrettyText.whitelist)    
-    if SiteSetting.add_rel_nofollow_to_user_content
-      sanitized = add_rel_nofollow_to_user_content(sanitized) 
-    end
-    sanitized
-  end
-  
-  def self.add_rel_nofollow_to_user_content(html)
-    whitelist = []
+    options[:topicId] = opts[:topic_id]
 
-    l = SiteSetting.exclude_rel_nofollow_domains
-    if l.present?
-      whitelist = l.split(",") 
-    end
+    working_text = text.dup
 
-    site_uri = nil
-    doc = Nokogiri::HTML.fragment(html)
-    doc.css("a").each do |l|
-      href = l["href"].to_s
-      begin 
-        uri = URI(href)
-        site_uri ||= URI(Discourse.base_url)
-        
-        if  !uri.host.present? || 
-            uri.host.ends_with?(site_uri.host) || 
-            whitelist.any?{|u| uri.host.ends_with?(u)}
-          # we are good no need for nofollow
-        else
-          l["rel"] = "nofollow"
-        end
-      rescue URI::InvalidURIError
-        # add a nofollow anyway 
-        l["rel"] = "nofollow"
+    begin
+      sanitized = markdown(working_text, options)
+    rescue MiniRacer::ScriptTerminatedError => e
+      if SiteSetting.censored_pattern.present?
+        Rails.logger.warn "Post cooking timed out. Clearing the censored_pattern setting and retrying."
+        SiteSetting.censored_pattern = nil
+        sanitized = markdown(working_text, options)
+      else
+        raise e
       end
     end
+
+    doc = Nokogiri::HTML.fragment(sanitized)
+
+    if !options[:omit_nofollow] && SiteSetting.add_rel_nofollow_to_user_content
+      add_rel_nofollow_to_user_content(doc)
+    end
+
+    if SiteSetting.enable_s3_uploads && SiteSetting.s3_cdn_url.present?
+      add_s3_cdn(doc)
+    end
+
     doc.to_html
   end
 
-  def self.extract_links(html)
-    doc = Nokogiri::HTML.fragment(html)
-    links = []
+  def self.add_s3_cdn(doc)
+    doc.css("img").each do |img|
+      next unless img["src"]
+      img["src"] = Discourse.store.cdn_url(img["src"])
+    end
+  end
+
+  def self.add_rel_nofollow_to_user_content(doc)
+    whitelist = []
+
+    domains = SiteSetting.exclude_rel_nofollow_domains
+    whitelist = domains.split('|') if domains.present?
+
+    site_uri = nil
     doc.css("a").each do |l|
-      links << l.attributes["href"].to_s
+      href = l["href"].to_s
+      begin
+        uri = URI(href)
+        site_uri ||= URI(Discourse.base_url)
+
+        if !uri.host.present? ||
+           uri.host == site_uri.host ||
+           uri.host.ends_with?("." << site_uri.host) ||
+           whitelist.any?{|u| uri.host == u || uri.host.ends_with?("." << u)}
+          # we are good no need for nofollow
+        else
+          l["rel"] = "nofollow noopener"
+        end
+      rescue URI::InvalidURIError, URI::InvalidComponentError
+        # add a nofollow anyway
+        l["rel"] = "nofollow noopener"
+      end
+    end
+  end
+
+  class DetectedLink < Struct.new(:url, :is_quote); end
+
+  def self.extract_links(html)
+    links = []
+    doc = Nokogiri::HTML.fragment(html)
+
+    # remove href inside quotes & elided part
+    doc.css("aside.quote a, .elided a").each { |a| a["href"] = "" }
+
+    # extract all links
+    doc.css("a").each do |a|
+      if a["href"].present? && a["href"][0] != "#".freeze
+        links << DetectedLink.new(a["href"], false)
+      end
     end
 
-    doc.css("aside.quote").each do |a|
-      topic_id = a.attributes['data-topic']
-      
-      url = "/t/topic/#{topic_id}"
-      if post_number = a.attributes['data-post']
-        url << "/#{post_number}"
+    # extract quotes
+    doc.css("aside.quote[data-topic]").each do |aside|
+      if aside["data-topic"].present?
+        url = "/t/topic/#{aside["data-topic"]}"
+        url << "/#{aside["data-post"]}" if aside["data-post"].present?
+        links << DetectedLink.new(url, true)
       end
+    end
 
-      links << url
+    # extract Youtube links
+    doc.css("div[data-youtube-id]").each do |div|
+      if div["data-youtube-id"].present?
+        links << DetectedLink.new("https://www.youtube.com/watch?v=#{div['data-youtube-id']}", false)
+      end
     end
 
     links
   end
 
-  class ExcerptParser < Nokogiri::XML::SAX::Document
+  def self.excerpt(html, max_length, options={})
+    # TODO: properly fix this HACK in ExcerptParser without introducing XSS
+    doc = Nokogiri::HTML.fragment(html)
+    strip_image_wrapping(doc)
+    html = doc.to_html
 
-    class DoneException < StandardError; end 
-
-    attr_reader :excerpt
-
-    def initialize(length)
-      @length = length 
-      @excerpt = ""
-      @current_length = 0
-    end
-
-    def self.get_excerpt(html, length)
-      me = self.new(length)
-      parser = Nokogiri::HTML::SAX::Parser.new(me)
-      begin 
-        copy = "<div>" 
-        copy << html unless html.nil?
-        copy << "</div>"
-        parser.parse(html) unless html.nil?
-      rescue DoneException
-        # we are done 
-      end
-      me.excerpt
-    end
-
-    def start_element(name, attributes=[])
-      case name 
-        when "img"
-          attributes = Hash[*attributes.flatten]
-          if attributes["alt"]
-            characters("[#{attributes["alt"]}]")
-          elsif attributes["title"]
-            characters("[#{attributes["title"]}]")
-          else
-            characters("[image]")
-          end
-        when "a"
-          c = "<a "
-          c << attributes.map{|k,v| "#{k}='#{v}'"}.join(' ')
-          c << ">"
-          characters(c, false, false, false)
-          @in_a = true
-        when "aside"
-          @in_quote = true 
-      end
-    end
-
-    def end_element(name)
-      case name 
-      when "a"
-        characters("</a>",false, false, false)
-        @in_a = false
-      when "p", "br"
-        characters(" ")
-      when "aside"
-        @in_quote = false
-      end
-    end
-
-    def characters(string, truncate = true, count_it = true, encode = true)
-      return if @in_quote
-      encode = encode ? lambda{|s| ERB::Util.html_escape(s)} : lambda {|s| s} 
-      if @current_length + string.length > @length && count_it
-        @excerpt << encode.call(string[0..(@length-@current_length)-1]) if truncate
-        @excerpt << "&hellip;"
-        @excerpt << "</a>" if @in_a
-        raise DoneException.new
-      end
-      @excerpt << encode.call(string)
-      @current_length += string.length if count_it
-    end
+    ExcerptParser.get_excerpt(html, max_length, options)
   end
 
-  def self.excerpt(html, length)
-    ExcerptParser.get_excerpt(html, length)
+  def self.strip_links(string)
+    return string if string.blank?
+
+    # If the user is not basic, strip links from their bio
+    fragment = Nokogiri::HTML.fragment(string)
+    fragment.css('a').each {|a| a.replace(a.inner_html) }
+    fragment.to_html
+  end
+
+ # Given a Nokogiri doc, convert all links to absolute
+ def self.make_all_links_absolute(doc)
+   site_uri = nil
+   doc.css("a").each do |link|
+     href = link["href"].to_s
+     begin
+       uri = URI(href)
+       site_uri ||= URI(Discourse.base_url)
+       link["href"] = "#{site_uri}#{link['href']}" unless uri.host.present?
+     rescue URI::InvalidURIError, URI::InvalidComponentError
+       # leave it
+     end
+   end
+ end
+
+  def self.strip_image_wrapping(doc)
+    doc.css(".lightbox-wrapper .meta").remove
+  end
+
+  def self.format_for_email(html, post = nil)
+    doc = Nokogiri::HTML.fragment(html)
+    DiscourseEvent.trigger(:reduce_cooked, doc, post)
+    strip_image_wrapping(doc)
+    make_all_links_absolute(doc)
+    doc.to_html
+  end
+
+  protected
+
+  class JavaScriptError < StandardError
+    attr_accessor :message, :backtrace
+
+    def initialize(message, backtrace)
+      @message = message
+      @backtrace = backtrace
+    end
+
+  end
+
+  def self.protect
+    rval = nil
+    @mutex.synchronize do
+      rval = yield
+    end
+    rval
+  end
+
+  def self.ctx_load(ctx, *files)
+    files.each do |file|
+      ctx.load(app_root + file)
+    end
   end
 
 end
-

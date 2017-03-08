@@ -1,4 +1,4 @@
-task "images:compress" => :environment do 
+task "images:compress" => :environment do
   io = ImageOptim.new
   images = Dir.glob("#{Rails.root}/app/**/*.png")
   image_sizes = Hash[*images.map{|i| [i,File.size(i)]}.to_a.flatten]
@@ -9,4 +9,3 @@ task "images:compress" => :environment do
     end
   end
 end
-

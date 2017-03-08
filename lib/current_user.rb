@@ -1,43 +1,47 @@
 module CurrentUser
 
+  def self.has_auth_cookie?(env)
+    Discourse.current_user_provider.new(env).has_auth_cookie?
+  end
+
   def self.lookup_from_env(env)
-    request = Rack::Request.new(env)
-    auth_token = request.cookies["_t"]
-    user = nil
-    if auth_token && auth_token.length == 32
-      user = User.where(auth_token: auth_token).first 
-    end
-    
-    return user
+    Discourse.current_user_provider.new(env).current_user
+  end
+
+
+  # can be used to pretend current user does no exist, for CSRF attacks
+  def clear_current_user
+    @current_user_provider = Discourse.current_user_provider.new({})
+  end
+
+  def log_on_user(user)
+    current_user_provider.log_on_user(user,session,cookies)
+  end
+
+  def log_off_user
+    current_user_provider.log_off_user(session,cookies)
+  end
+
+  def is_api?
+    current_user_provider.is_api?
+  end
+
+  def is_user_api?
+    current_user_provider.is_user_api?
   end
 
   def current_user
-    return @current_user if @current_user || @not_logged_in
+    current_user_provider.current_user
+  end
 
-    if session[:current_user_id].blank?
-      # maybe we have a cookie? 
-      auth_token = cookies[:_t]
-      if auth_token && auth_token.length == 32
-        @current_user = User.where(auth_token: auth_token).first
-        session[:current_user_id] = @current_user.id if @current_user
-      end
-    else
-      @current_user ||= User.where(id: session[:current_user_id]).first
-    end
+  def refresh_session(user)
+    current_user_provider.refresh_session(user,session,cookies)
+  end
 
-    if @current_user && @current_user.is_banned? 
-      @current_user = nil
-    end
+  private
 
-    @not_logged_in = session[:current_user_id].blank?
-    if @current_user
-      @current_user.update_last_seen! 
-      if (@current_user.ip_address != request.remote_ip) and request.remote_ip.present?
-        @current_user.ip_address = request.remote_ip
-        @current_user.update_column(:ip_address, request.remote_ip)
-      end
-    end
-    @current_user
+  def current_user_provider
+    @current_user_provider ||= Discourse.current_user_provider.new(request.env)
   end
 
 end

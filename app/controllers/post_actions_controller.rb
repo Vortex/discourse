@@ -1,80 +1,93 @@
 require_dependency 'discourse'
 
 class PostActionsController < ApplicationController
-
-  before_filter :ensure_logged_in, except: :users
+  before_filter :ensure_logged_in
   before_filter :fetch_post_from_params
+  before_filter :fetch_post_action_type_id_from_params
 
   def create
-    id = params[:post_action_type_id].to_i
-    if action = PostActionType.where(id: id).first
-      guardian.ensure_post_can_act!(@post, PostActionType.Types.invert[id])
+    raise Discourse::NotFound if @post.blank?
 
-      post_action = PostAction.act(current_user, @post, action.id, params[:message])
+    taken = PostAction.counts_for([@post], current_user)[@post.id]
 
-      if post_action.blank? or post_action.errors.present?
-        render_json_error(post_action)
-      else
-        # We need to reload or otherwise we are showing the old values on the front end
-        @post.reload
-        post_serializer = PostSerializer.new(@post, scope: guardian, root: false)
-        render_json_dump(post_serializer)
-      end
+    guardian.ensure_post_can_act!(
+      @post,
+      PostActionType.types[@post_action_type_id],
+      is_warning: params[:is_warning],
+      taken_actions: taken
+    )
 
+    args = {}
+    args[:message] = params[:message] if params[:message].present?
+    args[:is_warning] = params[:is_warning] if params[:is_warning].present? && guardian.is_staff?
+    args[:take_action] = true if guardian.is_staff? && params[:take_action] == 'true'
+    args[:flag_topic] = true if params[:flag_topic] == 'true'
+
+    post_action = PostAction.act(current_user, @post, @post_action_type_id, args)
+
+    if post_action.blank? || post_action.errors.present?
+      render_json_error(post_action)
     else
-      raise Discourse::InvalidParameters.new(:post_action_type_id)
+      # We need to reload or otherwise we are showing the old values on the front end
+      @post.reload
+
+      if @post_action_type_id == PostActionType.types[:like]
+        limiter = post_action.post_action_rate_limiter
+        response.headers['Discourse-Actions-Remaining'] = limiter.remaining.to_s
+        response.headers['Discourse-Actions-Max'] = limiter.max.to_s
+      end
+      render_post_json(@post, _add_raw = false)
     end
-  end
-
-  def users
-    requires_parameter(:post_action_type_id)
-    post_action_type_id = params[:post_action_type_id].to_i
-
-    guardian.ensure_can_see_post_actors!(@post.topic, post_action_type_id)
-
-    users = User.
-              joins(:post_actions).
-              where(["post_actions.post_id = ? and post_actions.post_action_type_id = ? and post_actions.deleted_at IS NULL", @post.id, post_action_type_id]).all
-
-    render_serialized(users, BasicUserSerializer)
   end
 
   def destroy
-    requires_parameter(:post_action_type_id)
-
-    post_action = current_user.post_actions.where(post_id: params[:id].to_i, post_action_type_id: params[:post_action_type_id].to_i, deleted_at: nil).first
+    post_action = current_user.post_actions.find_by(post_id: params[:id].to_i, post_action_type_id: @post_action_type_id, deleted_at: nil)
     raise Discourse::NotFound if post_action.blank?
+
     guardian.ensure_can_delete!(post_action)
+
     PostAction.remove_act(current_user, @post, post_action.post_action_type_id)
 
-    render nothing: true
+    @post.reload
+    render_post_json(@post, _add_raw = false)
   end
 
-  def clear_flags
-    requires_parameter(:post_action_type_id)
-    guardian.ensure_can_clear_flags!(@post)
+  def defer_flags
+    guardian.ensure_can_defer_flags!(@post)
 
-    PostAction.clear_flags!(@post, current_user.id, params[:post_action_type_id].to_i)
-    @post.reload
+    PostAction.defer_flags!(@post, current_user)
 
-    if @post.is_flagged?
-      render json: {success: true, hidden: true}
-    else
-      @post.unhide!
-      render json: {success: true, hidden: false}
-    end
+    render json: { success: true }
   end
 
   private
 
     def fetch_post_from_params
-      requires_parameter(:id)
-      finder = Post.where(id: params[:id])
+      params.require(:id)
 
-      # Include deleted posts if the user is a moderator
-      finder = finder.with_deleted if current_user.try(:has_trust_level?, :moderator)      
+      flag_topic = params[:flag_topic]
+      flag_topic = flag_topic && (flag_topic == true || flag_topic == "true")
+
+      post_id = if flag_topic
+        begin
+          Topic.find(params[:id]).posts.first.id
+        rescue
+          raise Discourse::NotFound
+        end
+      else
+        params[:id]
+      end
+
+      finder = Post.where(id: post_id)
+
+      # Include deleted posts if the user is a staff
+      finder = finder.with_deleted if guardian.is_staff?
 
       @post = finder.first
-      guardian.ensure_can_see!(@post)
+    end
+
+    def fetch_post_action_type_id_from_params
+      params.require(:post_action_type_id)
+      @post_action_type_id = params[:post_action_type_id].to_i
     end
 end

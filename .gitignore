@@ -4,13 +4,16 @@
 # or operating system, you probably want to add a global ignore instead:
 #   git config --global core.excludesfile ~/.gitignore_global
 
-tags
-
 .DS_Store
 ._.DS_Store
 dump.rdb
 
+bin/*
+
 .sass-cache/*
+public/csv/*
+public/plugins/*
+public/tombstone/*
 
 # Ignore bundler config
 /.bundle
@@ -19,17 +22,35 @@ dump.rdb
 /cache
 /coverage/*
 
-config/database.yml
-config/redis.yml
+/public/assets/*
+/public/tombstone/*
+/bundle/*
+
+config/discourse.pill
+config/discourse.conf
 
 # Ignore the default SQLite database and db dumps
+*.sql
+*.sql.gz
 /db/*.sqlite3
-/dbs/*.sql
-/dbs/*.sql.gz
+/db/structure.sql
 
 # Ignore all logfiles and tempfiles.
 /log/*.log
 /tmp
+/logfile
+log/
+
+# Ignore plugins except for the bundled ones.
+/plugins/*
+!/plugins/emoji/
+!/plugins/lazyYT/
+!/plugins/poll/
+!/plugins/discourse-details/
+!/plugins/discourse-nginx-performance-report
+/plugins/*/auto_generated/
+
+/spec/fixtures/plugins/my_plugin/auto_generated
 
 # Ignore Eclipse .project file
 /.project
@@ -37,29 +58,33 @@ config/redis.yml
 # Ignore Eclipse .buildpath file
 /.buildpath
 
+# Ignore byebug history
+/.byebug_history
+
 # Ignore RubyMine settings
 /.idea
 
 # Ignore gem that is copied in
 MiniProfiler/Ruby/rack-mini-profiler-2.0.1a.gem
 
-sublime-project.sublime-workspace
+discourse.sublime-workspace
 
 # Vim temp files
 *~
 *.swp
 *.swo
 
-# don't check in multisite config 
+# don't check in multisite config
 config/multisite.yml
 # don't check in my renamed multisite config as well :)
 config/multisite1.yml
 config/fog_credentials.yml
 
 /public/uploads
+/public/backups
 /public/stylesheet-cache/*
 
-# Scripts used for downloading/refshing db
+# Scripts used for downloading/refreshing db
 script/download_db
 script/refresh_db
 
@@ -69,5 +94,21 @@ chef/tmp/*
 # .procfile
 .procfile
 
-# exclude our git version file for now 
+# .env, local environment variables for use with foreman
+.env
+
+# exclude our git version file for now
 config/version.rb
+
+# ignore the Ruby Version manager (rvm)
+.rvmrc
+.ruby-version
+.ruby-gemset
+.rbenv
+bundler_stubs/*
+
+vendor/bundle/*
+*.db
+
+#ignore jetbrains ide file
+*.iml

@@ -1,130 +1,70 @@
 # Discourse Advanced Developer Install Guide
 
-This guide is aimed at advanced Rails developers who have installed their own Rails apps before. If you are new
-to rails, you are likely much better off with our **[Discourse Vagrant Developer Guide](https://github.com/discourse/discourse/blob/master/docs/VAGRANT.md)**.
+This guide is aimed at advanced Rails developers who have installed their own Rails apps before. If you are new to Rails, you are likely much better off with our **[Discourse Vagrant Developer Guide](VAGRANT.md)**.
 
-## First Steps
+Note: If you are developing on a Mac, you will probably want to look at [these instructions](DEVELOPMENT-OSX-NATIVE.md) as well.
 
-1. Install and configure PostgreSQL 9.1+
-2. Install and configure Redis 2+
-3. Install Ruby 1.9.3 and Bundler.
-3. Clone the project.
-4. Create development and test databases in postgres.
-5. Copy `config/database.yml.sample` and `config/redis.yml.sample` to `config/database.yml` and `config/redis.yml` and input the correct values to point to your postgres and redis instances.
-6. We recommend starting with seed data to play around in your development environment. [Download Seed SQL Data][seed_download]. Install it into postgres using a command like this: `psql -d discourse_development < dev-discourse-seed.sql`.
+# Preparing a fresh Ubuntu install
 
+To get your Ubuntu 16.04 LTS install up and running to develop Discourse and Discourse plugins follow the commands below. We assume an English install of Ubuntu.
 
-## Before you start Rails
+    # Basics
+    whoami > /tmp/username
+    sudo add-apt-repository ppa:chris-lea/redis-server
+    sudo apt-get -yqq update
+    sudo apt-get -yqq install python-software-properties vim curl expect debconf-utils git-core build-essential zlib1g-dev libssl-dev openssl libcurl4-openssl-dev libreadline6-dev libpcre3 libpcre3-dev imagemagick postgresql postgresql-contrib-9.5 libpq-dev postgresql-server-dev-9.5 redis-server advancecomp gifsicle jhead jpegoptim libjpeg-turbo-progs optipng pngcrush pngquant gnupg2
 
-1. `bundle install`
-2. `rake db:migrate`
-3. `rake db:test:prepare`
-4. Try running the specs: `bundle exec rspec`
-5. `bundle exec rails server`
+    # Ruby
+    curl -sSL https://rvm.io/mpapis.asc | gpg2 --import -
+    curl -sSL https://get.rvm.io | bash -s stable
+    echo 'gem: --no-document' >> ~/.gemrc
 
-You should now be able to connect to rails on http://localhost:3000 - try it out! The seed data includes a pinned topic that explains how to get an admin account, so start there! Happy hacking!
+    # Logout and back in to activate RVM installation
 
-
-# Building your own Vagrant VM
-
-Here are the steps we used to create the **[Vagrant Virtual Machine](https://github.com/discourse/discourse/blob/master/docs/VAGRANT.md)**. They might be useful if you plan on setting up an environment from scratch on Linux:
+    rvm install 2.3.1
+    rvm --default use 2.3.1 # If this error out check https://rvm.io/integration/gnome-terminal
+    gem install bundler mailcatcher
 
 
-## Base box
+    # Postgresql
+    sudo su postgres
+    createuser --createdb --superuser -Upostgres $(cat /tmp/username)
+    psql -c "ALTER USER $(cat /tmp/username) WITH PASSWORD 'password';"
+    psql -c "create database discourse_development owner $(cat /tmp/username) encoding 'UTF8' TEMPLATE template0;"
+    psql -c "create database discourse_test        owner $(cat /tmp/username) encoding 'UTF8' TEMPLATE template0;"
+    psql -d discourse_development -c "CREATE EXTENSION hstore;"
+    psql -d discourse_development -c "CREATE EXTENSION pg_trgm;"
+    exit
 
-Vagrant version 1.0.5. With this Vagrantfile:
+    # Node
+    curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.31.1/install.sh | bash
+    # exit the terminal and open it again
+    nvm install 6.2.0
+    nvm alias default 6.2.0
+    npm install -g svgo phantomjs-prebuilt
 
-    Vagrant::Config.run do |config|
-      config.vm.box     = 'precise32'
-      config.vm.box_url = 'http://files.vagrantup.com/precise32.box'
-      config.vm.network :hostonly, '192.168.10.200'
-    
-      if RUBY_PLATFORM =~ /darwin/
-        config.vm.share_folder("v-root", "/vagrant", ".", :nfs => true)
-      end
-    end
 
-    vagrant up
-    vagrant ssh
+If everything goes alright, let's clone Discourse and start hacking:
 
-## Some basic setup:
+    git clone https://github.com/discourse/discourse.git ~/discourse
+    cd ~/discourse
+    bundle install
+    bundle exec rake db:create db:migrate db:test:prepare
+    bundle exec rake autospec # CTRL + C to stop; Optional
+    bundle exec rails s -b 0.0.0.0 # Open browser on http://localhost:3000 and you should see Discourse
 
-    sudo su -
-    ln -sf /usr/share/zoneinfo/Canada/Eastern /etc/localtime
-    apt-get -yqq update
-    apt-get -yqq install python-software-properties
-    apt-get -yqq install vim curl expect debconf-utils git-core build-essential zlib1g-dev libssl-dev openssl libcurl4-openssl-dev libreadline6-dev libpcre3 libpcre3-dev
+Create a test account, and enable it with:
 
-## Unicode
+    bundle exec rails c
+    u = User.find_by_id 1
+    u.activate
+    u.grant_admin!
+    exit
 
-    echo "export LANGUAGE=en_US.UTF-8" >> /etc/bash.bashrc
-    echo "export LANG=en_US.UTF-8" >> /etc/bash.bashrc
-    echo "export LC_ALL=en_US.UTF-8" >> /etc/bash.bashrc
-    export LANGUAGE=en_US.UTF-8
-    export LANG=en_US.UTF-8
-    export LC_ALL=en_US.UTF-8
-    
-    locale-gen en_US.UTF-8
-    dpkg-reconfigure locales
+Discourse does a lot of stuff async, so it's better to run sidekiq even on development mode:
 
-## RVM and Ruby
+    ruby $(mailcatcher) # open http://localhost:1080 to see the emails, stop with pkill -f mailcatcher
+    bundle exec sidekiq -q critical,low,default -d -l log/sidekiq.log # open http://localhost:3000/sidekiq to see the queue, stop with pkill -f sidekiq
+    bundle exec rails server
 
-    apt-get -yqq install libyaml-dev libsqlite3-dev sqlite3 libxml2-dev libxslt-dev autoconf libc6-dev ncurses-dev automake libtool bison subversion pkg-config curl build-essential git
-    
-    su - vagrant -c "sudo bash -s stable < <(curl -s https://raw.github.com/wayneeseguin/rvm/master/binscripts/rvm-installer)"
-    adduser vagrant rvm
-    source /etc/profile.d/rvm.sh
-    su - vagrant -c "rvm pkg install libyaml"
-    su - vagrant -c "rvm install 1.9.3-p374"
-    su - vagrant -c "rvm use 1.9.3-p374 --default"
-    
-    echo "gem: --no-rdoc --no-ri" >> /etc/gemrc
-    su - vagrant -c "echo 'gem: --no-rdoc --no-ri' >> ~/.gemrc"
-
-## Postgres 9.1
-
-Configure so that the vagrant user doesn't need to provide username and password.
-
-    apt-get -yqq install postgresql postgresql-contrib-9.1 libpq-dev postgresql-server-dev-9.1
-    su - postgres
-    psql -c "CREATE USER vagrant WITH PASSWORD 'password';"
-    psql -c "ALTER USER vagrant WITH PASSWORD 'password';"
-    createdb vagrant
-    psql -c "CREATE EXTENSION hstore;"
-    psql -c "ALTER USER vagrant CREATEDB"
-    psql -c "create database discourse_development owner vagrant encoding 'UTF8' TEMPLATE template0;"
-    psql -c "create database discourse_test        owner vagrant encoding 'UTF8' TEMPLATE template0;"
-
-Also, a user "discourse" is needed when importing a database image.
-
-    createuser --createdb --superuser discourse
-    psql -c "ALTER USER discourse WITH PASSWORD 'password';"
-
-Edit /etc/postgresql/9.1/main/pg_hba.conf to have this:
-
-    local all all trust 
-    host all all 127.0.0.1/32 trust
-    host all all ::1/128 trust
-    host all all 0.0.0.0/0 trust # wide-open
-
-Download a database image from [http://discourse.org/vms/dev-discourse-seed.sql][seed_download].
-
-Load it (as vagrant user):
-
-    psql -d discourse_development < dev-discourse-seed.sql
-
-## Redis
-
-    mkdir /tmp/redis_install
-    cd /tmp/redis_install
-    wget http://redis.googlecode.com/files/redis-2.6.7.tar.gz
-    tar xvf redis-2.6.7.tar.gz
-    cd redis-2.6.7
-    make
-    make install
-    cd utils
-    ./install_server.sh
-    # Press enter to accept all the defaults
-    /etc/init.d/redis_6379 start
-
-[seed_download]: (http://discourse.org/vms/dev-discourse-seed.sql)
+And happy hacking!

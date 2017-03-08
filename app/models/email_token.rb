@@ -1,17 +1,18 @@
 class EmailToken < ActiveRecord::Base
   belongs_to :user
 
-  validates_presence_of :token
-  validates_presence_of :user_id
-  validates_presence_of :email
+  validates :token, :user_id, :email, presence: true
 
-  before_validation(:on => :create) do
+  before_validation(on: :create) do
     self.token = EmailToken.generate_token
+    self.email = self.email.downcase if self.email
   end
 
   after_create do
     # Expire the previous tokens
-    EmailToken.update_all 'expired = true', ['user_id = ? and id != ?', self.user_id, self.id]
+    EmailToken.where(user_id: self.user_id)
+              .where("id != ?", self.id)
+              .update_all(expired: true)
   end
 
   def self.token_length
@@ -19,37 +20,89 @@ class EmailToken < ActiveRecord::Base
   end
 
   def self.valid_after
-    1.week.ago
+    SiteSetting.email_token_valid_hours.hours.ago
+  end
+
+  def self.unconfirmed
+    where(confirmed: false)
+  end
+
+  def self.active
+    where(expired: false).where('created_at > ?', valid_after)
   end
 
   def self.generate_token
     SecureRandom.hex(EmailToken.token_length)
   end
 
-  def self.confirm(token)
-    return unless token.present?
-    return unless token.length/2 == EmailToken.token_length
+  def self.valid_token_format?(token)
+    token.present? && token =~ /\h{#{token.length/2}}/i
+  end
 
-    email_token = EmailToken.where("token = ? AND expired = FALSE and created_at >= ?", token, EmailToken.valid_after).includes(:user).first
-    return if email_token.blank?
+  def self.atomic_confirm(token)
+    failure = { success: false }
+    return failure unless valid_token_format?(token)
+
+    email_token = confirmable(token)
+    return failure if email_token.blank?
 
     user = email_token.user
-    User.transaction do
-      row_count = EmailToken.update_all 'confirmed = true', ['id = ? AND confirmed = false', email_token.id]
-      if row_count == 1
+    failure[:user] = user
+    row_count = EmailToken.where(confirmed: false, id: email_token.id, expired: false).update_all 'confirmed = true'
 
+    if row_count == 1
+      { success: true, user: user, email_token: email_token }
+    else
+      failure
+    end
+  end
+
+  def self.confirm(token)
+    User.transaction do
+      result = atomic_confirm(token)
+      user = result[:user]
+      if result[:success]
         # If we are activating the user, send the welcome message
         user.send_welcome_message = !user.active?
 
         user.active = true
-        user.email = email_token.email
+        user.email = result[:email_token].email
         user.save!
       end
+
+      if user
+        return User.find_by(email: Email.downcase(user.email)) if Invite.redeem_from_email(user.email).present?
+        user
+      end
     end
-    user
   rescue ActiveRecord::RecordInvalid
     # If the user's email is already taken, just return nil (failure)
-    nil
   end
 
+  def self.confirmable(token)
+    EmailToken.where(token: token)
+              .where(expired: false, confirmed: false)
+              .where("created_at >= ?", EmailToken.valid_after)
+              .includes(:user)
+              .first
+  end
 end
+
+# == Schema Information
+#
+# Table name: email_tokens
+#
+#  id         :integer          not null, primary key
+#  user_id    :integer          not null
+#  email      :string           not null
+#  token      :string           not null
+#  confirmed  :boolean          default(FALSE), not null
+#  expired    :boolean          default(FALSE), not null
+#  created_at :datetime         not null
+#  updated_at :datetime         not null
+#
+# Indexes
+#
+#  index_email_tokens_on_token    (token) UNIQUE
+#  index_email_tokens_on_user_id  (user_id)
+#

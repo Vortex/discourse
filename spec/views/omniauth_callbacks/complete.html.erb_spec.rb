@@ -1,43 +1,43 @@
-require "spec_helper"
+require "rails_helper"
+
+require "auth/authenticator"
+require_dependency "auth/result"
 
 describe "users/omniauth_callbacks/complete.html.erb" do
-  it "renders facebook data " do
-    assign(:data, {:username =>"username", :auth_provider=> "Facebook", :awaiting_activation=>true})
+
+  let :rendered_data do
+    JSON.parse(rendered.match(/var authResult = (.*);/)[1])
+  end
+
+  it "renders auth info" do
+    result = Auth::Result.new
+    result.user = User.new
+
+    assign(:auth_result, result)
 
     render
 
-    rendered_data = JSON.parse(rendered.match(/window.opener.Discourse.authenticationComplete\((.*)\)/)[1])
-
-    rendered_data["username"].should eq("username")
-    rendered_data["auth_provider"].should eq("Facebook")
-    rendered_data["awaiting_activation"].should eq(true)
+    expect(rendered_data["authenticated"]).to eq(false)
+    expect(rendered_data["awaiting_activation"]).to eq(false)
+    expect(rendered_data["awaiting_approval"]).to eq(false)
   end
 
-  it "renders twitter data " do
-    assign(:data, {:username =>"username", :auth_provider=>"Twitter", :awaiting_activation=>true})
+  it "renders cas data " do
+    result = Auth::Result.new
+
+    result.email = "xxx@xxx.com"
+    result.authenticator_name = "CAS"
+
+    assign(:auth_result, result)
 
     render
 
-    rendered_data = JSON.parse(rendered.match(/window.opener.Discourse.authenticationComplete\((.*)\)/)[1])
-
-    rendered_data["username"].should eq("username")
-    rendered_data["auth_provider"].should eq("Twitter")
-    rendered_data["awaiting_activation"].should eq(true)
+    expect(rendered_data["email"]).to eq(result.email)
+    # TODO this is a bit weird, the upcasing is confusing,
+    #  clean it up throughout
+    expect(rendered_data["auth_provider"]).to eq("Cas")
   end
 
-
-  it "renders openid data " do
-    assign(:data, {:username =>"username", :auth_provider=>"OpenId", :awaiting_activation=>true})
-
-    render
-
-    rendered_data = JSON.parse(rendered.match(/window.opener.Discourse.authenticationComplete\((.*)\)/)[1])
-
-    rendered_data["username"].should eq("username")
-    rendered_data["auth_provider"].should eq("OpenId")
-    rendered_data["awaiting_activation"].should eq(true)
-  end
-  
 end
 
 

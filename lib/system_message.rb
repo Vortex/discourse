@@ -1,6 +1,7 @@
 # Handle sending a message to a user from the system.
 require_dependency 'post_creator'
-require_dependency 'multisite_i18n'
+require_dependency 'topic_subtype'
+require_dependency 'discourse'
 
 class SystemMessage
 
@@ -8,41 +9,62 @@ class SystemMessage
     self.new(recipient).create(type, params)
   end
 
-  def initialize(recipient)
-    @recipient = recipient  
+  def self.create_from_system_user(recipient, type, params = {})
+    self.new(recipient).create_from_system_user(type, params)
   end
 
-  def create(type, params = {})    
+  def initialize(recipient)
+    @recipient = recipient
+  end
 
-    defaults = {site_name: SiteSetting.title,
-                username: @recipient.username,
-                user_preferences_url: "#{Discourse.base_url}/users/#{@recipient.username_lower}/preferences",
-                new_user_tips: MultisiteI18n.t("system_messages.usage_tips.text_body_template"),
-                site_password: "",
-                base_url: Discourse.base_url}
-
+  def create(type, params = {})
     params = defaults.merge(params)
 
-    if SiteSetting.restrict_access?
-      params[:site_password] = MultisiteI18n.t('system_messages.site_password', access_password: SiteSetting.access_password)
-    end
-              
-    title = MultisiteI18n.t("system_messages.#{type}.subject_template", params)
-    raw_body = MultisiteI18n.t("system_messages.#{type}.text_body_template", params)
+    title = I18n.t("system_messages.#{type}.subject_template", params)
+    raw = I18n.t("system_messages.#{type}.text_body_template", params)
 
-    PostCreator.create(SystemMessage.system_user,
-                       raw: raw_body,
+    creator = PostCreator.new(Discourse.site_contact_user,
                        title: title,
+                       raw: raw,
                        archetype: Archetype.private_message,
-                       target_usernames: @recipient.username)
+                       target_usernames: @recipient.username,
+                       subtype: TopicSubtype.system_message,
+                       skip_validations: true)
+
+    post = creator.create
+    if creator.errors.present?
+      raise StandardError, creator.errors.full_messages.join(" ")
+    end
+
+    UserArchivedMessage.create!(user: Discourse.site_contact_user, topic: post.topic)
+
+    post
   end
 
+  def create_from_system_user(type, params = {})
+    params = defaults.merge(params)
 
-  # Either returns the system_username user or the first admin.
-  def self.system_user
-    user = User.where(username_lower: SiteSetting.system_username).first if SiteSetting.system_username.present?
-    user = User.where(admin: true).order(:id).first if user.blank?
-    user
+    title = I18n.t("system_messages.#{type}.subject_template", params)
+    raw = I18n.t("system_messages.#{type}.text_body_template", params)
+
+    PostCreator.create!(Discourse.system_user,
+                       title: title,
+                       raw: raw,
+                       archetype: Archetype.private_message,
+                       target_usernames: @recipient.username,
+                       subtype: TopicSubtype.system_message,
+                       skip_validations: true)
+  end
+
+  def defaults
+    {
+      site_name: SiteSetting.title,
+      username: @recipient.username,
+      user_preferences_url: "#{Discourse.base_url}/users/#{@recipient.username_lower}/preferences",
+      new_user_tips: I18n.t('system_messages.usage_tips.text_body_template', base_url: Discourse.base_url),
+      site_password: "",
+      base_url: Discourse.base_url,
+    }
   end
 
 end

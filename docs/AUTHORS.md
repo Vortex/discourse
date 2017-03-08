@@ -1,19 +1,16 @@
-# The Discourse Team
+# The Core Discourse Team
 
-* Jeff Atwood - Founder, Principal Overlord, Lead Systems Design
+* [Jeff Atwood](//github.com/coding-horror) - Co-Founder, PM
+* [Robin Ward](//github.com/eviltrout) - Co-Founder, Developer
+* [Sam Saffron](//github.com/samsaffron) - Co-Founder, Developer
+* [Neil Lalonde](//github.com/nlalonde) - Developer
+* [Régis Hanol](//github.com/zogstrip) - Développeur
 
-* Robin Ward - Co-Founder, Ruby developer
+### Special Thanks To
 
-* Sam Saffron - Co-Founder, Ruby developer
+* Nick Sahler - Intern
+* Ryan Mudryk - CSS and HTML design implementation
+* Don Petersen - Developer, installation scripts
 
-* Neil Lalonde - Ruby Developer
-
-* Ryan Mudryk - UI Implementation, supplemental
-
-### Specials Thanks To
-
-* Nick Sahler - UI Implementation, supplemental
-
-* Don Petersen - Ruby developer, installation scripts
-
-*For a more detailed list of the many individuals that contributed to the design and development of Discourse outside of GitHub, please refer to the official Discourse website.*
+*For a more detailed list of the many individuals that contributed to the design and development of Discourse outside of GitHub, please refer to [the official Discourse website](http://www.discourse.org).*
+*For a list of people who have contributed to the codebase, see [GitHub's list of contributors](https://github.com/discourse/discourse/contributors).*

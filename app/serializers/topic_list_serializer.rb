@@ -1,6 +1,13 @@
 class TopicListSerializer < ApplicationSerializer
 
-  attributes :can_create_topic, :more_topics_url, :filter_summary, :draft, :draft_key, :draft_sequence
+  attributes :can_create_topic,
+             :more_topics_url,
+             :draft,
+             :draft_key,
+             :draft_sequence,
+             :for_period,
+             :per_page,
+             :tags
 
   has_many :topics, serializer: TopicListItemSerializer, embed: :objects
 
@@ -8,8 +15,15 @@ class TopicListSerializer < ApplicationSerializer
     scope.can_create?(Topic)
   end
 
-  def include_more_topics_url?
-    object.more_topics_url.present? and (object.topics.size == SiteSetting.topics_per_page)
+  def include_for_period?
+    for_period.present?
   end
 
+  def include_more_topics_url?
+    object.more_topics_url.present? && (object.topics.size == object.per_page)
+  end
+
+  def include_tags?
+    Tag.include_tags?
+  end
 end
